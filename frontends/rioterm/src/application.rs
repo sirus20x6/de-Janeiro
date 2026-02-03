@@ -928,6 +928,15 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
 
                 match state {
                     ElementState::Pressed => {
+                        // Check if clicking on a divider for resizing splits
+                        if button == MouseButton::Left {
+                            let divider_hit = route.window.screen.divider_at_mouse();
+                            if divider_hit != crate::context::grid::DividerHit::None {
+                                route.window.screen.start_divider_drag(divider_hit);
+                                return;
+                            }
+                        }
+
                         // In case need to switch grid current
                         route.window.screen.select_current_based_on_mouse();
 
@@ -997,6 +1006,14 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                         route.window.screen.process_mouse_bindings(button);
                     }
                     ElementState::Released => {
+                        // End any divider drag operation
+                        if button == MouseButton::Left
+                            && route.window.screen.is_divider_dragging()
+                        {
+                            route.window.screen.end_divider_drag();
+                            return;
+                        }
+
                         if !route.window.screen.modifiers.state().shift_key()
                             && route.window.screen.mouse_mode()
                         {
@@ -1081,6 +1098,68 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                 let y = y.clamp(0.0, (layout.height as i32 - 1).into()) as usize;
                 route.window.screen.mouse.x = x;
                 route.window.screen.mouse.y = y;
+
+                // Handle divider dragging
+                if route.window.screen.is_divider_dragging() {
+                    // Maintain appropriate cursor during drag
+                    if let Some(ref drag) = route.window.screen.mouse.divider_drag {
+                        let cursor = match drag.divider_type {
+                            crate::mouse::DividerType::Horizontal => CursorIcon::RowResize,
+                            crate::mouse::DividerType::Vertical => CursorIcon::ColResize,
+                        };
+                        route.window.winit_window.set_cursor(cursor);
+                    }
+                    if route.window.screen.update_divider_drag() {
+                        route.window.screen.context_manager.request_render();
+                    }
+                    return;
+                }
+
+                // Check for divider hover and set appropriate cursor
+                // This must happen before the early return below to ensure cursor updates
+                let divider_hit = route.window.screen.divider_at_mouse();
+                let prev_hovered = route
+                    .window
+                    .screen
+                    .context_manager
+                    .current_grid()
+                    .hovered_divider;
+
+                if divider_hit != crate::context::grid::DividerHit::None {
+                    let cursor = match divider_hit {
+                        crate::context::grid::DividerHit::Horizontal { .. } => {
+                            CursorIcon::RowResize
+                        }
+                        crate::context::grid::DividerHit::Vertical { .. } => {
+                            CursorIcon::ColResize
+                        }
+                        crate::context::grid::DividerHit::None => CursorIcon::Default,
+                    };
+                    route.window.winit_window.set_cursor(cursor);
+
+                    // Update hovered divider and redraw if changed
+                    if divider_hit != prev_hovered {
+                        route
+                            .window
+                            .screen
+                            .context_manager
+                            .current_grid_mut()
+                            .set_hovered_divider(divider_hit);
+                        route.window.screen.context_manager.request_render();
+                    }
+                    return;
+                }
+
+                // Clear hovered divider if we're not over one
+                if prev_hovered != crate::context::grid::DividerHit::None {
+                    route
+                        .window
+                        .screen
+                        .context_manager
+                        .current_grid_mut()
+                        .set_hovered_divider(crate::context::grid::DividerHit::None);
+                    route.window.screen.context_manager.request_render();
+                }
 
                 let point = route.window.screen.mouse_position(display_offset);
 

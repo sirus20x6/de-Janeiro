@@ -77,6 +77,23 @@ pub struct Delta<T: Default> {
     pub bottom_y: T,
 }
 
+/// Result of checking if a mouse position is over a split divider
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DividerHit {
+    /// Mouse is not over any divider
+    None,
+    /// Mouse is over a horizontal divider (between top/bottom splits)
+    Horizontal {
+        /// Context key of the split above the divider
+        context_above: usize,
+    },
+    /// Mouse is over a vertical divider (between left/right splits)
+    Vertical {
+        /// Context key of the split to the left of the divider
+        context_left: usize,
+    },
+}
+
 pub struct ContextGrid<T: EventListener> {
     pub width: f32,
     pub height: f32,
@@ -86,6 +103,8 @@ pub struct ContextGrid<T: EventListener> {
     scaled_padding: f32,
     inner: HashMap<usize, ContextGridItem<T>>,
     pub root: Option<usize>,
+    /// Currently hovered divider (for highlighting)
+    pub hovered_divider: DividerHit,
 }
 
 pub struct ContextGridItem<T: EventListener> {
@@ -161,9 +180,16 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
             border_color,
             scaled_padding,
             root: Some(root_key),
+            hovered_divider: DividerHit::None,
         };
         grid.calculate_positions_for_affected_nodes(&[root_key]);
         grid
+    }
+
+    /// Set the currently hovered divider for highlighting
+    #[inline]
+    pub fn set_hovered_divider(&mut self, divider: DividerHit) {
+        self.hovered_divider = divider;
     }
 
     #[inline]
@@ -487,6 +513,105 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
         false
     }
 
+    /// Check if the given mouse position is over a split divider.
+    /// Returns the type of divider hit and the context key adjacent to it.
+    pub fn divider_at_position(&self, mouse_x: usize, mouse_y: usize) -> DividerHit {
+        let len = self.inner.len();
+        if len <= 1 {
+            return DividerHit::None;
+        }
+
+        // Use the same coordinate scaling as select_current_based_on_mouse
+        let scale = self.scaled_padding / PADDING;
+
+        // Hit detection zone: 2 pixels on each side of the divider
+        let hit_margin: usize = 2;
+
+        // Check all contexts for dividers
+        for (key, item) in &self.inner {
+            // Use exact same scaling as select_current_based_on_mouse
+            let position = item.position();
+            let scaled_position_x = (position[0] * scale) as usize;
+            let scaled_position_y = (position[1] * scale) as usize;
+            let width = item.val.dimension.width as usize;
+            let height = item.val.dimension.height as usize;
+
+            // Check for horizontal divider (below this context)
+            // A divider exists if this context has a down child
+            if item.down.is_some() {
+                let divider_y = scaled_position_y + height;
+                let y_min = divider_y.saturating_sub(hit_margin);
+                let y_max = divider_y + hit_margin;
+
+                if mouse_y >= y_min
+                    && mouse_y <= y_max
+                    && mouse_x >= scaled_position_x
+                    && mouse_x <= scaled_position_x + width
+                {
+                    return DividerHit::Horizontal { context_above: *key };
+                }
+            }
+
+            // Check for horizontal divider (above this context)
+            // A divider exists if this context has a parent and is a down child
+            if let Some(parent_key) = item.parent {
+                if let Some(parent) = self.inner.get(&parent_key) {
+                    if parent.down == Some(*key) {
+                        // This context is a down child, divider is above it
+                        let divider_y = scaled_position_y;
+                        let y_min = divider_y.saturating_sub(hit_margin);
+                        let y_max = divider_y + hit_margin;
+
+                        if mouse_y >= y_min
+                            && mouse_y <= y_max
+                            && mouse_x >= scaled_position_x
+                            && mouse_x <= scaled_position_x + width
+                        {
+                            return DividerHit::Horizontal {
+                                context_above: parent_key,
+                            };
+                        }
+                    }
+
+                    if parent.right == Some(*key) {
+                        // This context is a right child, divider is to the left
+                        let divider_x = scaled_position_x;
+                        let x_min = divider_x.saturating_sub(hit_margin);
+                        let x_max = divider_x + hit_margin;
+
+                        if mouse_x >= x_min
+                            && mouse_x <= x_max
+                            && mouse_y >= scaled_position_y
+                            && mouse_y <= scaled_position_y + height
+                        {
+                            return DividerHit::Vertical {
+                                context_left: parent_key,
+                            };
+                        }
+                    }
+                }
+            }
+
+            // Check for vertical divider (to the right of this context)
+            // A divider exists if this context has a right child
+            if item.right.is_some() {
+                let divider_x = scaled_position_x + width;
+                let x_min = divider_x.saturating_sub(hit_margin);
+                let x_max = divider_x + hit_margin;
+
+                if mouse_x >= x_min
+                    && mouse_x <= x_max
+                    && mouse_y >= scaled_position_y
+                    && mouse_y <= scaled_position_y + height
+                {
+                    return DividerHit::Vertical { context_left: *key };
+                }
+            }
+        }
+
+        DividerHit::None
+    }
+
     pub fn find_by_rich_text_id(&self, searched_rich_text_id: usize) -> Option<usize> {
         for (key, item) in &self.inner {
             if item.val.rich_text_id == searched_rich_text_id {
@@ -529,18 +654,44 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
 
             let item_pos = item.position();
 
-            // Always create horizontal border
+            // Check if horizontal divider below this context is hovered
+            let h_divider_hovered = matches!(
+                self.hovered_divider,
+                DividerHit::Horizontal { context_above } if context_above == key
+            );
+
+            // Check if vertical divider to the right of this context is hovered
+            let v_divider_hovered = matches!(
+                self.hovered_divider,
+                DividerHit::Vertical { context_left } if context_left == key
+            );
+
+            // Highlight color for hovered dividers (bright white/cyan)
+            let highlight_color: [f32; 4] = [0.4, 0.8, 1.0, 1.0];
+
+            // Create horizontal border (highlighted if hovered and has down child)
+            let h_color = if h_divider_hovered && item.down.is_some() {
+                highlight_color
+            } else {
+                self.border_color
+            };
+            let h_thickness = if h_divider_hovered && item.down.is_some() {
+                3.0
+            } else {
+                1.0
+            };
             objects.push(create_border(
-                self.border_color,
+                h_color,
                 [
                     item_pos[0],
                     item_pos[1]
                         + (item.val.dimension.height
-                            / item.val.dimension.dimension.scale),
+                            / item.val.dimension.dimension.scale)
+                        - if h_divider_hovered && item.down.is_some() { 1.0 } else { 0.0 },
                 ],
                 [
                     item.val.dimension.width / item.val.dimension.dimension.scale,
-                    1.,
+                    h_thickness,
                 ],
             ));
 
@@ -549,16 +700,27 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
                 self.plot_objects_recursive(objects, down_key);
             }
 
-            // Always create vertical border
+            // Create vertical border (highlighted if hovered and has right child)
+            let v_color = if v_divider_hovered && item.right.is_some() {
+                highlight_color
+            } else {
+                self.border_color
+            };
+            let v_thickness = if v_divider_hovered && item.right.is_some() {
+                3.0
+            } else {
+                1.0
+            };
             objects.push(create_border(
-                self.border_color,
+                v_color,
                 [
                     item_pos[0]
-                        + (item.val.dimension.width / item.val.dimension.dimension.scale),
+                        + (item.val.dimension.width / item.val.dimension.dimension.scale)
+                        - if v_divider_hovered && item.right.is_some() { 1.0 } else { 0.0 },
                     item_pos[1],
                 ],
                 [
-                    1.,
+                    v_thickness,
                     item.val.dimension.height / item.val.dimension.dimension.scale,
                 ],
             ));
@@ -1798,6 +1960,135 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
         false
     }
 
+    /// Move a horizontal divider by a delta amount.
+    /// context_above is the key of the context above the divider.
+    /// Positive delta moves the divider down (grows above, shrinks below).
+    /// Negative delta moves the divider up (shrinks above, grows below).
+    pub fn move_horizontal_divider(&mut self, context_above: usize, delta: f32) -> bool {
+        if self.inner.len() <= 1 {
+            return false;
+        }
+
+        // Get the context above and its down child
+        let down_key = match self.inner.get(&context_above) {
+            Some(item) => item.down,
+            None => return false,
+        };
+
+        let down_key = match down_key {
+            Some(k) => k,
+            None => return false,
+        };
+
+        let (above_height, below_height) = match (
+            self.inner.get(&context_above),
+            self.inner.get(&down_key),
+        ) {
+            (Some(above_item), Some(below_item)) => {
+                (above_item.val.dimension.height, below_item.val.dimension.height)
+            }
+            _ => return false,
+        };
+
+        let min_height = 50.0;
+        let new_above_height = above_height + delta;
+        let new_below_height = below_height - delta;
+
+        if new_above_height < min_height || new_below_height < min_height {
+            return false;
+        }
+
+        // Update heights
+        if let Some(above_item) = self.inner.get_mut(&context_above) {
+            above_item.val.dimension.update_height(new_above_height);
+        }
+        if let Some(below_item) = self.inner.get_mut(&down_key) {
+            below_item.val.dimension.update_height(new_below_height);
+        }
+
+        // Note: We don't call request_resize here during drag operations
+        // to avoid sending too many resize signals. The resize is sent
+        // when the drag ends via finalize_divider_drag().
+
+        // Update positions for affected nodes
+        self.calculate_positions_for_affected_nodes(&[context_above, down_key]);
+        true
+    }
+
+    /// Move a vertical divider by a delta amount.
+    /// context_left is the key of the context to the left of the divider.
+    /// Positive delta moves the divider right (grows left, shrinks right).
+    /// Negative delta moves the divider left (shrinks left, grows right).
+    pub fn move_vertical_divider(&mut self, context_left: usize, delta: f32) -> bool {
+        if self.inner.len() <= 1 {
+            return false;
+        }
+
+        // Get the context to the left and its right child
+        let right_key = match self.inner.get(&context_left) {
+            Some(item) => item.right,
+            None => return false,
+        };
+
+        let right_key = match right_key {
+            Some(k) => k,
+            None => return false,
+        };
+
+        let (left_width, right_width) = match (
+            self.inner.get(&context_left),
+            self.inner.get(&right_key),
+        ) {
+            (Some(left_item), Some(right_item)) => {
+                (left_item.val.dimension.width, right_item.val.dimension.width)
+            }
+            _ => return false,
+        };
+
+        let min_width = 100.0;
+        let new_left_width = left_width + delta;
+        let new_right_width = right_width - delta;
+
+        if new_left_width < min_width || new_right_width < min_width {
+            return false;
+        }
+
+        // Update widths
+        if let Some(left_item) = self.inner.get_mut(&context_left) {
+            left_item.val.dimension.update_width(new_left_width);
+        }
+        if let Some(right_item) = self.inner.get_mut(&right_key) {
+            right_item.val.dimension.update_width(new_right_width);
+        }
+
+        // Update all children in the vertical stacks to match their parent's width
+        self.update_children_width(context_left, new_left_width);
+        self.update_children_width(right_key, new_right_width);
+
+        // Note: We don't call request_resize here during drag operations
+        // to avoid sending too many resize signals. The resize is sent
+        // when the drag ends via finalize_divider_drag().
+
+        // Collect all affected nodes (parents and their children)
+        let mut affected_nodes = vec![context_left, right_key];
+        self.collect_all_children(context_left, &mut affected_nodes);
+        self.collect_all_children(right_key, &mut affected_nodes);
+
+        // Update positions for affected nodes
+        self.calculate_positions_for_affected_nodes(&affected_nodes);
+        true
+    }
+
+    /// Finalize a divider drag by sending resize signals to all contexts.
+    /// This should be called when the drag operation ends.
+    pub fn finalize_divider_drag(&mut self) {
+        // Send resize to all contexts
+        let keys: Vec<usize> = self.inner.keys().cloned().collect();
+        for key in keys {
+            self.request_resize(key);
+        }
+    }
+
     /// Update the width of all children in a vertical stack to match the parent's width
     fn update_children_width(&mut self, parent_key: usize, new_width: f32) {
         // Find all down children and update their width
@@ -1817,7 +2108,8 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
             return;
         };
 
-        self.request_resize(key);
+        // Note: request_resize is not called here during drag operations
+        // to avoid sending too many resize signals
 
         // Continue down the chain
         if let Some(down_key) = down_key {
@@ -7075,6 +7367,342 @@ pub mod test {
         assert!(
             (new_panel3_width - initial_panel3_width - move_amount).abs() < 1.0,
             "Panel 3 should expand by approximately the move amount"
+        );
+    }
+
+    #[test]
+    fn test_divider_at_position_no_splits() {
+        let margin = Delta {
+            x: 0.,
+            top_y: 0.,
+            bottom_y: 0.,
+        };
+
+        let context_dimension = ContextDimension::build(
+            600.0,
+            600.0,
+            SugarDimensions {
+                scale: 2.,
+                width: 14.,
+                height: 8.,
+            },
+            1.0,
+            Delta::<f32>::default(),
+        );
+
+        let context =
+            create_mock_context(VoidListener {}, WindowId::from(0), 0, context_dimension);
+
+        let grid = ContextGrid::<VoidListener>::new(context, margin, [0., 0., 0., 0.]);
+
+        // With only one context, there should be no dividers
+        assert_eq!(grid.divider_at_position(300, 300), DividerHit::None);
+    }
+
+    #[test]
+    fn test_divider_at_position_horizontal() {
+        let margin = Delta {
+            x: 0.,
+            top_y: 0.,
+            bottom_y: 0.,
+        };
+
+        let context_dimension = ContextDimension::build(
+            600.0,
+            600.0,
+            SugarDimensions {
+                scale: 2.,
+                width: 14.,
+                height: 8.,
+            },
+            1.0,
+            Delta::<f32>::default(),
+        );
+
+        let first_context =
+            create_mock_context(VoidListener {}, WindowId::from(0), 0, context_dimension);
+        let second_context =
+            create_mock_context(VoidListener {}, WindowId::from(0), 1, context_dimension);
+
+        let mut grid =
+            ContextGrid::<VoidListener>::new(first_context, margin, [0., 0., 0., 0.]);
+
+        // Split down creates a horizontal divider between first and second
+        grid.split_down(second_context);
+
+        // Get the first context's key
+        let first_key = grid.find_by_rich_text_id(0).unwrap();
+        let first_height = grid.inner.get(&first_key).unwrap().val.dimension.height;
+
+        // The horizontal divider should be at the bottom of the first context
+        let divider_y = first_height as usize;
+
+        // Test clicking on the horizontal divider area
+        let hit = grid.divider_at_position(100, divider_y);
+        assert!(
+            matches!(hit, DividerHit::Horizontal { context_above } if context_above == first_key),
+            "Expected horizontal divider hit at divider position (y={}), got {:?}",
+            divider_y,
+            hit
+        );
+
+        // Test clicking well above the divider (in first context)
+        let hit = grid.divider_at_position(100, 50);
+        assert_eq!(
+            hit,
+            DividerHit::None,
+            "Expected no divider hit far from divider"
+        );
+
+        // Test clicking well below the divider (in second context)
+        let hit = grid.divider_at_position(100, 500);
+        assert_eq!(
+            hit,
+            DividerHit::None,
+            "Expected no divider hit far from divider"
+        );
+    }
+
+    #[test]
+    fn test_divider_at_position_vertical() {
+        let margin = Delta {
+            x: 0.,
+            top_y: 0.,
+            bottom_y: 0.,
+        };
+
+        let context_dimension = ContextDimension::build(
+            600.0,
+            600.0,
+            SugarDimensions {
+                scale: 2.,
+                width: 14.,
+                height: 8.,
+            },
+            1.0,
+            Delta::<f32>::default(),
+        );
+
+        let first_context =
+            create_mock_context(VoidListener {}, WindowId::from(0), 0, context_dimension);
+        let second_context =
+            create_mock_context(VoidListener {}, WindowId::from(0), 1, context_dimension);
+
+        let mut grid =
+            ContextGrid::<VoidListener>::new(first_context, margin, [0., 0., 0., 0.]);
+
+        // Split right creates a vertical divider between first and second
+        grid.split_right(second_context);
+
+        // Get the first context's key
+        let first_key = grid.find_by_rich_text_id(0).unwrap();
+        let first_width = grid.inner.get(&first_key).unwrap().val.dimension.width;
+
+        // The vertical divider should be at the right of the first context
+        let divider_x = first_width as usize;
+
+        // Test clicking on the vertical divider area
+        let hit = grid.divider_at_position(divider_x, 100);
+        assert!(
+            matches!(hit, DividerHit::Vertical { context_left } if context_left == first_key),
+            "Expected vertical divider hit at divider position (x={}), got {:?}",
+            divider_x,
+            hit
+        );
+
+        // Test clicking well to the left of the divider (in first context)
+        let hit = grid.divider_at_position(50, 100);
+        assert_eq!(
+            hit,
+            DividerHit::None,
+            "Expected no divider hit far from divider"
+        );
+
+        // Test clicking well to the right of the divider (in second context)
+        let hit = grid.divider_at_position(500, 100);
+        assert_eq!(
+            hit,
+            DividerHit::None,
+            "Expected no divider hit far from divider"
+        );
+    }
+
+    #[test]
+    fn test_move_horizontal_divider() {
+        let margin = Delta {
+            x: 0.,
+            top_y: 0.,
+            bottom_y: 0.,
+        };
+
+        let context_dimension = ContextDimension::build(
+            600.0,
+            600.0,
+            SugarDimensions {
+                scale: 2.,
+                width: 14.,
+                height: 8.,
+            },
+            1.0,
+            Delta::<f32>::default(),
+        );
+
+        let first_context =
+            create_mock_context(VoidListener {}, WindowId::from(0), 0, context_dimension);
+        let second_context =
+            create_mock_context(VoidListener {}, WindowId::from(0), 1, context_dimension);
+
+        let mut grid =
+            ContextGrid::<VoidListener>::new(first_context, margin, [0., 0., 0., 0.]);
+
+        grid.split_down(second_context);
+
+        let first_key = grid.find_by_rich_text_id(0).unwrap();
+        let second_key = grid.find_by_rich_text_id(1).unwrap();
+
+        // Get initial heights (may not be exactly 300 due to padding)
+        let initial_first_height = grid.inner.get(&first_key).unwrap().val.dimension.height;
+        let initial_second_height = grid.inner.get(&second_key).unwrap().val.dimension.height;
+
+        // Move the horizontal divider down by 50 (grows first, shrinks second)
+        let result = grid.move_horizontal_divider(first_key, 50.0);
+        assert!(result, "Moving horizontal divider should succeed");
+
+        let new_first_height = grid.inner.get(&first_key).unwrap().val.dimension.height;
+        let new_second_height = grid.inner.get(&second_key).unwrap().val.dimension.height;
+        assert_eq!(
+            new_first_height,
+            initial_first_height + 50.0,
+            "First context should grow by 50"
+        );
+        assert_eq!(
+            new_second_height,
+            initial_second_height - 50.0,
+            "Second context should shrink by 50"
+        );
+
+        // Move the horizontal divider up by 100 (shrinks first, grows second)
+        let result = grid.move_horizontal_divider(first_key, -100.0);
+        assert!(result, "Moving horizontal divider should succeed");
+
+        let final_first_height = grid.inner.get(&first_key).unwrap().val.dimension.height;
+        assert_eq!(
+            final_first_height,
+            initial_first_height - 50.0,
+            "First context should be 50 less than original"
+        );
+    }
+
+    #[test]
+    fn test_move_vertical_divider() {
+        let margin = Delta {
+            x: 0.,
+            top_y: 0.,
+            bottom_y: 0.,
+        };
+
+        let context_dimension = ContextDimension::build(
+            600.0,
+            600.0,
+            SugarDimensions {
+                scale: 2.,
+                width: 14.,
+                height: 8.,
+            },
+            1.0,
+            Delta::<f32>::default(),
+        );
+
+        let first_context =
+            create_mock_context(VoidListener {}, WindowId::from(0), 0, context_dimension);
+        let second_context =
+            create_mock_context(VoidListener {}, WindowId::from(0), 1, context_dimension);
+
+        let mut grid =
+            ContextGrid::<VoidListener>::new(first_context, margin, [0., 0., 0., 0.]);
+
+        grid.split_right(second_context);
+
+        let first_key = grid.find_by_rich_text_id(0).unwrap();
+        let second_key = grid.find_by_rich_text_id(1).unwrap();
+
+        // Get initial widths (may not be exactly 300 due to padding)
+        let initial_first_width = grid.inner.get(&first_key).unwrap().val.dimension.width;
+        let initial_second_width = grid.inner.get(&second_key).unwrap().val.dimension.width;
+
+        // Move the vertical divider right by 50 (grows first, shrinks second)
+        let result = grid.move_vertical_divider(first_key, 50.0);
+        assert!(result, "Moving vertical divider should succeed");
+
+        let new_first_width = grid.inner.get(&first_key).unwrap().val.dimension.width;
+        let new_second_width = grid.inner.get(&second_key).unwrap().val.dimension.width;
+        assert_eq!(
+            new_first_width,
+            initial_first_width + 50.0,
+            "First context should grow by 50"
+        );
+        assert_eq!(
+            new_second_width,
+            initial_second_width - 50.0,
+            "Second context should shrink by 50"
+        );
+
+        // Move the vertical divider left by 100 (shrinks first, grows second)
+        let result = grid.move_vertical_divider(first_key, -100.0);
+        assert!(result, "Moving vertical divider should succeed");
+
+        let final_first_width = grid.inner.get(&first_key).unwrap().val.dimension.width;
+        assert_eq!(
+            final_first_width,
+            initial_first_width - 50.0,
+            "First context should be 50 less than original"
+        );
+    }
+
+    #[test]
+    fn test_move_divider_minimum_constraints() {
+        let margin = Delta {
+            x: 0.,
+            top_y: 0.,
+            bottom_y: 0.,
+        };
+
+        let context_dimension = ContextDimension::build(
+            400.0,
+            400.0,
+            SugarDimensions {
+                scale: 2.,
+                width: 14.,
+                height: 8.,
+            },
+            1.0,
+            Delta::<f32>::default(),
+        );
+
+        let first_context =
+            create_mock_context(VoidListener {}, WindowId::from(0), 0, context_dimension);
+        let second_context =
+            create_mock_context(VoidListener {}, WindowId::from(0), 1, context_dimension);
+
+        let mut grid =
+            ContextGrid::<VoidListener>::new(first_context, margin, [0., 0., 0., 0.]);
+
+        grid.split_down(second_context);
+
+        let first_key = grid.find_by_rich_text_id(0).unwrap();
+
+        // Try to move divider too far down (would make second context too small)
+        let result = grid.move_horizontal_divider(first_key, 200.0);
+        assert!(
+            !result,
+            "Should fail when trying to shrink below minimum height"
+        );
+
+        // Try to move divider too far up (would make first context too small)
+        let result = grid.move_horizontal_divider(first_key, -200.0);
+        assert!(
+            !result,
+            "Should fail when trying to shrink below minimum height"
         );
     }
 }

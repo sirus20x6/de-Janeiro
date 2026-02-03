@@ -312,6 +312,105 @@ impl Screen<'_> {
         }
     }
 
+    /// Check if the mouse is currently over a split divider
+    #[inline]
+    pub fn divider_at_mouse(&self) -> crate::context::grid::DividerHit {
+        self.context_manager
+            .current_grid()
+            .divider_at_position(self.mouse.x, self.mouse.y)
+    }
+
+    /// Start dragging a divider based on the divider hit
+    #[inline]
+    pub fn start_divider_drag(&mut self, divider_hit: crate::context::grid::DividerHit) {
+        use crate::context::grid::DividerHit;
+        use crate::mouse::{DividerDrag, DividerType};
+
+        match divider_hit {
+            DividerHit::Horizontal { context_above } => {
+                self.mouse.divider_drag = Some(DividerDrag {
+                    divider_type: DividerType::Horizontal,
+                    context_above_or_left: context_above,
+                    last_position: self.mouse.y as f32,
+                });
+            }
+            DividerHit::Vertical { context_left } => {
+                self.mouse.divider_drag = Some(DividerDrag {
+                    divider_type: DividerType::Vertical,
+                    context_above_or_left: context_left,
+                    last_position: self.mouse.x as f32,
+                });
+            }
+            DividerHit::None => {}
+        }
+    }
+
+    /// Update the divider position during a drag operation.
+    /// Returns true if the divider was moved.
+    #[inline]
+    pub fn update_divider_drag(&mut self) -> bool {
+        use crate::mouse::DividerType;
+
+        let drag = match self.mouse.divider_drag {
+            Some(d) => d,
+            None => return false,
+        };
+
+        let (current_pos, delta) = match drag.divider_type {
+            DividerType::Horizontal => {
+                let current = self.mouse.y as f32;
+                (current, current - drag.last_position)
+            }
+            DividerType::Vertical => {
+                let current = self.mouse.x as f32;
+                (current, current - drag.last_position)
+            }
+        };
+
+        // Skip if delta is too small
+        if delta.abs() < 2.0 {
+            return false;
+        }
+
+        let moved = match drag.divider_type {
+            DividerType::Horizontal => self
+                .context_manager
+                .current_grid_mut()
+                .move_horizontal_divider(drag.context_above_or_left, delta),
+            DividerType::Vertical => self
+                .context_manager
+                .current_grid_mut()
+                .move_vertical_divider(drag.context_above_or_left, delta),
+        };
+
+        if moved {
+            // Update last position for next delta calculation
+            if let Some(ref mut d) = self.mouse.divider_drag {
+                d.last_position = current_pos;
+            }
+        }
+
+        moved
+    }
+
+    /// End the current divider drag operation
+    #[inline]
+    pub fn end_divider_drag(&mut self) {
+        if self.mouse.divider_drag.is_some() {
+            // Finalize the drag by sending resize signals to all contexts
+            self.context_manager
+                .current_grid_mut()
+                .finalize_divider_drag();
+        }
+        self.mouse.divider_drag = None;
+    }
+
+    /// Check if a divider drag is in progress
+    #[inline]
+    pub fn is_divider_dragging(&self) -> bool {
+        self.mouse.divider_drag.is_some()
+    }
+
     #[inline]
     pub fn mouse_position(&self, display_offset: usize) -> Pos {
         let current_grid = self.context_manager.current_grid();

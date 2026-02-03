@@ -16,6 +16,26 @@ pub struct AccumulatedScroll {
     pub y: f64,
 }
 
+/// Type of split divider
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DividerType {
+    /// Horizontal divider between top/bottom splits (dragged vertically)
+    Horizontal,
+    /// Vertical divider between left/right splits (dragged horizontally)
+    Vertical,
+}
+
+/// State for tracking divider drag operations
+#[derive(Debug, Clone, Copy)]
+pub struct DividerDrag {
+    /// Type of divider being dragged
+    pub divider_type: DividerType,
+    /// The context key above (for horizontal) or left (for vertical) of the divider
+    pub context_above_or_left: usize,
+    /// Initial mouse position when drag started (y for horizontal, x for vertical)
+    pub last_position: f32,
+}
+
 #[derive(Debug)]
 pub struct Mouse {
     pub multiplier: f64,
@@ -31,6 +51,8 @@ pub struct Mouse {
     pub inside_text_area: bool,
     pub x: usize,
     pub y: usize,
+    /// State for tracking divider drag operations
+    pub divider_drag: Option<DividerDrag>,
 }
 
 impl Default for Mouse {
@@ -49,6 +71,7 @@ impl Default for Mouse {
             accumulated_scroll: AccumulatedScroll::default(),
             x: Default::default(),
             y: Default::default(),
+            divider_drag: None,
         }
     }
 }
