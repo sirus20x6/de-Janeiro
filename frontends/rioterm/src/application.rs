@@ -928,6 +928,32 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
 
                 match state {
                     ElementState::Pressed => {
+                        // Check if clicking on a scrollbar
+                        if button == MouseButton::Left {
+                            if let Some((context_key, hit)) =
+                                route.window.screen.scrollbar_at_mouse()
+                            {
+                                use crate::renderer::scrollbar::ScrollbarHit;
+                                match hit {
+                                    ScrollbarHit::Thumb => {
+                                        // Start dragging the thumb
+                                        route.window.screen.start_scrollbar_drag(context_key);
+                                        return;
+                                    }
+                                    ScrollbarHit::TrackAbove | ScrollbarHit::TrackBelow => {
+                                        // Click-to-jump on track
+                                        route
+                                            .window
+                                            .screen
+                                            .scroll_to_scrollbar_position(context_key);
+                                        route.window.screen.context_manager.request_render();
+                                        return;
+                                    }
+                                    ScrollbarHit::None => {}
+                                }
+                            }
+                        }
+
                         // Check if clicking on a divider for resizing splits
                         if button == MouseButton::Left {
                             let divider_hit = route.window.screen.divider_at_mouse();
@@ -1015,6 +1041,14 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                         route.window.screen.process_mouse_bindings(button);
                     }
                     ElementState::Released => {
+                        // End any scrollbar drag operation
+                        if button == MouseButton::Left
+                            && route.window.screen.is_scrollbar_dragging()
+                        {
+                            route.window.screen.end_scrollbar_drag();
+                            return;
+                        }
+
                         // End any divider drag operation
                         if button == MouseButton::Left
                             && route.window.screen.is_divider_dragging()
@@ -1108,6 +1142,15 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                 route.window.screen.mouse.x = x;
                 route.window.screen.mouse.y = y;
 
+                // Handle scrollbar dragging
+                if route.window.screen.is_scrollbar_dragging() {
+                    route.window.winit_window.set_cursor(CursorIcon::Default);
+                    if route.window.screen.update_scrollbar_drag() {
+                        route.window.screen.context_manager.request_render();
+                    }
+                    return;
+                }
+
                 // Handle divider dragging
                 if route.window.screen.is_divider_dragging() {
                     // Maintain appropriate cursor during drag
@@ -1122,6 +1165,22 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                         route.window.screen.context_manager.request_render();
                     }
                     return;
+                }
+
+                // Check for scrollbar hover and set appropriate cursor
+                if let Some((_, hit)) = route.window.screen.scrollbar_at_mouse() {
+                    if hit != crate::renderer::scrollbar::ScrollbarHit::None {
+                        route.window.winit_window.set_cursor(CursorIcon::Default);
+                        if route.window.screen.update_scrollbar_hover() {
+                            route.window.screen.context_manager.request_render();
+                        }
+                        return;
+                    }
+                } else {
+                    // Clear scrollbar hover if we're not over a scrollbar
+                    if route.window.screen.update_scrollbar_hover() {
+                        route.window.screen.context_manager.request_render();
+                    }
                 }
 
                 // Check for divider hover and set appropriate cursor

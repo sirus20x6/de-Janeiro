@@ -135,7 +135,6 @@ impl<T: rio_backend::event::EventListener> ContextGridItem<T> {
 
 impl<T: rio_backend::event::EventListener> ContextGridItem<T> {
     #[inline]
-    #[allow(unused)]
     pub fn context(&self) -> &Context<T> {
         &self.val
     }
@@ -190,6 +189,11 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
     #[inline]
     pub fn set_hovered_divider(&mut self, divider: DividerHit) {
         self.hovered_divider = divider;
+    }
+
+    #[inline]
+    pub fn get(&self, key: usize) -> Option<&ContextGridItem<T>> {
+        self.inner.get(&key)
     }
 
     #[inline]

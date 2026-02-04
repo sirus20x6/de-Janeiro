@@ -290,4 +290,42 @@ impl QuadBrush {
         render_pass.set_vertex_buffer(0, self.instances.slice(..));
         render_pass.draw(0..6, 0..1);
     }
+
+    /// Render scrollbar overlay quads from state
+    pub fn render_scrollbar_overlays<'a>(
+        &'a mut self,
+        context: &mut Context,
+        state: &crate::sugarloaf::state::SugarState,
+        render_pass: &mut wgpu::RenderPass<'a>,
+    ) {
+        let instances = &state.scrollbar_overlays;
+        let total = instances.len();
+
+        if total == 0 {
+            return;
+        }
+
+        if total > self.supported_quantity {
+            self.instances.destroy();
+
+            self.supported_quantity = total;
+            self.instances = context.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("sugarloaf::quad scrollbar instances"),
+                size: mem::size_of::<Quad>() as u64 * self.supported_quantity as u64,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+        }
+
+        let instance_bytes = bytemuck::cast_slice(instances);
+        context
+            .queue
+            .write_buffer(&self.instances, 0, instance_bytes);
+
+        render_pass.set_pipeline(&self.pipeline);
+        render_pass.set_bind_group(0, &self.constants, &[]);
+        render_pass.set_vertex_buffer(0, self.instances.slice(..));
+
+        render_pass.draw(0..6, 0..total as u32);
+    }
 }

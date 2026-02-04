@@ -1,12 +1,15 @@
 mod char_cache;
 mod font_cache;
 pub mod navigation;
+pub mod scrollbar;
 mod search;
 pub mod utils;
 
 use crate::context::renderable::TerminalSnapshot;
 use crate::renderer::font_cache::FontCache;
+use crate::renderer::scrollbar::{draw_scrollbar, ScrollbarHit, ScrollbarState};
 use char_cache::CharCache;
+use rio_backend::config::scrollbar::Scrollbar as ScrollbarConfig;
 use rio_backend::crosswords::LineDamage;
 use rio_backend::event::TerminalDamage;
 
@@ -39,6 +42,17 @@ pub struct Search {
     active_search: Option<String>,
 }
 
+/// Data needed to calculate and render scrollbar for a context
+struct ScrollbarData {
+    context_key: usize,
+    position: [f32; 2],
+    width: f32,
+    height: f32,
+    display_offset: usize,
+    history_size: usize,
+    screen_lines: usize,
+}
+
 pub struct Renderer {
     is_vi_mode_enabled: bool,
     is_game_mode_enabled: bool,
@@ -66,6 +80,10 @@ pub struct Renderer {
     font_context: rio_backend::sugarloaf::font::FontLibrary,
     font_cache: FontCache,
     char_cache: CharCache,
+    // Scrollbar configuration
+    pub scrollbar_config: ScrollbarConfig,
+    // Scrollbar states for each context (keyed by context key)
+    scrollbar_states: HashMap<usize, ScrollbarState>,
 }
 
 impl Renderer {
@@ -122,6 +140,8 @@ impl Renderer {
             font_context: font_context.clone(),
             char_cache: CharCache::new(),
             is_game_mode_enabled: config.renderer.strategy.is_game(),
+            scrollbar_config: config.scrollbar.clone(),
+            scrollbar_states: HashMap::new(),
         };
 
         // Pre-populate font cache with common characters for better performance
@@ -853,8 +873,13 @@ impl Renderer {
             self.last_active = Some(active_key);
         }
 
+        // Collect scrollbar data during context iteration
+        let mut scrollbar_data_list: Vec<ScrollbarData> = Vec::new();
+
         for (key, grid_context) in grid.contexts_mut().iter_mut() {
             let is_active = &active_key == key;
+            // Get position before taking mutable context reference
+            let position = grid_context.position();
             let context = grid_context.context_mut();
 
             let mut has_ime = false;
@@ -873,6 +898,21 @@ impl Renderer {
             }
 
             let force_full_damage = has_active_changed || self.is_game_mode_enabled;
+
+            // Always collect scrollbar data for all contexts (even if content doesn't need rendering)
+            {
+                let terminal = context.terminal.lock();
+                let data = ScrollbarData {
+                    context_key: *key,
+                    position,
+                    width: context.dimension.width,
+                    height: context.dimension.height,
+                    display_offset: terminal.display_offset(),
+                    history_size: terminal.history_size(),
+                    screen_lines: terminal.screen_lines(),
+                };
+                scrollbar_data_list.push(data);
+            }
 
             // Check if we need to render
             if !context.renderable_content.pending_update.is_dirty() && !force_full_damage
@@ -928,6 +968,7 @@ impl Renderer {
                     damage,
                     columns: terminal.columns(),
                     screen_lines: terminal.screen_lines(),
+                    history_size: terminal.history_size(),
                 };
                 terminal.reset_damage();
                 drop(terminal);
@@ -1114,6 +1155,48 @@ impl Renderer {
         context_manager.extend_with_grid_objects(&mut objects);
         // let _duration = start.elapsed();
 
+        // Draw scrollbars for each context using overlay mechanism
+        let mut scrollbar_quads = Vec::new();
+        for data in &scrollbar_data_list {
+            // Get hover state from existing state before recalculating
+            let is_hovered = self
+                .scrollbar_states
+                .get(&data.context_key)
+                .map(|s| s.hovered)
+                .unwrap_or(false);
+
+            let mut scrollbar_state = ScrollbarState::calculate(
+                &self.scrollbar_config,
+                data.position[0],
+                data.position[1],
+                data.width / scale_factor,
+                data.height / scale_factor,
+                data.display_offset,
+                data.history_size,
+                data.screen_lines,
+                scale_factor,
+            );
+
+            // Preserve hover state
+            scrollbar_state.hovered = is_hovered;
+
+            // Draw the scrollbar - collect quads for overlay rendering
+            let scrollbar_objects =
+                draw_scrollbar(&scrollbar_state, &self.scrollbar_config, is_hovered);
+            for obj in scrollbar_objects {
+                if let rio_backend::sugarloaf::Object::Quad(quad) = obj {
+                    scrollbar_quads.push(quad);
+                }
+            }
+
+            // Store scrollbar state for hit testing
+            self.scrollbar_states
+                .insert(data.context_key, scrollbar_state);
+        }
+
+        // Set scrollbar overlays to render on top of terminal content
+        sugarloaf.set_scrollbar_overlays(scrollbar_quads);
+
         // Update visual bell state and set overlay if needed
         let visual_bell_active = self.update_visual_bell();
 
@@ -1169,6 +1252,55 @@ impl Renderer {
             .hint_labels
             .iter()
             .find(|label| label.position == pos)
+    }
+
+    /// Check if a mouse position hits any scrollbar
+    /// Returns (context_key, ScrollbarHit) if hit, None otherwise
+    pub fn scrollbar_hit_test(
+        &self,
+        mouse_x: f32,
+        mouse_y: f32,
+        scale: f32,
+    ) -> Option<(usize, ScrollbarHit)> {
+        for (key, state) in &self.scrollbar_states {
+            let hit = state.hit_test(mouse_x, mouse_y, scale);
+            if hit != ScrollbarHit::None {
+                return Some((*key, hit));
+            }
+        }
+        None
+    }
+
+    /// Get the scrollbar state for a specific context
+    pub fn get_scrollbar_state(&self, context_key: usize) -> Option<&ScrollbarState> {
+        self.scrollbar_states.get(&context_key)
+    }
+
+    /// Set the hover state for a scrollbar
+    pub fn set_scrollbar_hover(&mut self, context_key: usize, hovered: bool) {
+        if let Some(state) = self.scrollbar_states.get_mut(&context_key) {
+            state.hovered = hovered;
+        }
+    }
+
+    /// Clear all scrollbar hover states
+    pub fn clear_scrollbar_hover(&mut self) {
+        for state in self.scrollbar_states.values_mut() {
+            state.hovered = false;
+        }
+    }
+
+    /// Convert Y coordinate to scroll offset for a specific context's scrollbar
+    pub fn scrollbar_y_to_offset(
+        &self,
+        context_key: usize,
+        y: f32,
+        history_size: usize,
+        scale: f32,
+    ) -> Option<usize> {
+        self.scrollbar_states
+            .get(&context_key)
+            .map(|state| state.y_to_offset(y, history_size, scale))
     }
 }
 

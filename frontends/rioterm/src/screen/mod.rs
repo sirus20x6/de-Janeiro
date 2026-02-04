@@ -411,6 +411,174 @@ impl Screen<'_> {
         self.mouse.divider_drag.is_some()
     }
 
+    /// Check if the mouse is currently over a scrollbar
+    /// Returns (context_key, ScrollbarHit) if hit, None otherwise
+    #[inline]
+    pub fn scrollbar_at_mouse(
+        &self,
+    ) -> Option<(usize, crate::renderer::scrollbar::ScrollbarHit)> {
+        let scale = self.sugarloaf.scale_factor();
+        self.renderer
+            .scrollbar_hit_test(self.mouse.x as f32, self.mouse.y as f32, scale)
+    }
+
+    /// Start dragging a scrollbar thumb
+    #[inline]
+    pub fn start_scrollbar_drag(&mut self, context_key: usize) {
+        use crate::mouse::ScrollbarDrag;
+
+        // Get the current display offset for this context
+        let display_offset = {
+            let grid = self.context_manager.current_grid();
+            if let Some(item) = grid.get(context_key) {
+                item.context().terminal.lock().display_offset()
+            } else {
+                // Fallback to current context if key not found
+                self.context_manager.current().terminal.lock().display_offset()
+            }
+        };
+
+        self.mouse.scrollbar_drag = Some(ScrollbarDrag {
+            context_key,
+            start_y: self.mouse.y as f32,
+            start_offset: display_offset,
+        });
+    }
+
+    /// Update the scroll position during a scrollbar drag operation.
+    /// Returns true if the scroll position changed.
+    #[inline]
+    pub fn update_scrollbar_drag(&mut self) -> bool {
+        let drag = match self.mouse.scrollbar_drag {
+            Some(d) => d,
+            None => return false,
+        };
+
+        let scale = self.sugarloaf.scale_factor();
+        let current_y = self.mouse.y as f32;
+
+        // Get history size from the terminal
+        let history_size = {
+            let grid = self.context_manager.current_grid();
+            if let Some(item) = grid.get(drag.context_key) {
+                item.context().terminal.lock().history_size()
+            } else {
+                return false;
+            }
+        };
+
+        // Calculate new scroll offset based on mouse position
+        if let Some(new_offset) =
+            self.renderer
+                .scrollbar_y_to_offset(drag.context_key, current_y, history_size, scale)
+        {
+            // Get mutable access to the terminal and update scroll
+            let grid = self.context_manager.current_grid_mut();
+            if let Some(item) = grid.get_mut(drag.context_key) {
+                let mut terminal = item.context_mut().terminal.lock();
+                let current_offset = terminal.display_offset();
+
+                if new_offset != current_offset {
+                    // Set the new display offset
+                    terminal.grid.scroll_display(
+                        rio_backend::crosswords::grid::Scroll::Delta(
+                            new_offset as i32 - current_offset as i32,
+                        ),
+                    );
+                    terminal.mark_fully_damaged();
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+
+    /// End the current scrollbar drag operation
+    #[inline]
+    pub fn end_scrollbar_drag(&mut self) {
+        self.mouse.scrollbar_drag = None;
+    }
+
+    /// Check if a scrollbar drag is in progress
+    #[inline]
+    pub fn is_scrollbar_dragging(&self) -> bool {
+        self.mouse.scrollbar_drag.is_some()
+    }
+
+    /// Handle a click on the scrollbar track (click-to-jump)
+    #[inline]
+    pub fn scroll_to_scrollbar_position(&mut self, context_key: usize) {
+        let scale = self.sugarloaf.scale_factor();
+        let y = self.mouse.y as f32;
+
+        // Get history size from the terminal
+        let history_size = {
+            let grid = self.context_manager.current_grid();
+            if let Some(item) = grid.get(context_key) {
+                item.context().terminal.lock().history_size()
+            } else {
+                return;
+            }
+        };
+
+        // Calculate new scroll offset based on mouse position
+        if let Some(new_offset) =
+            self.renderer
+                .scrollbar_y_to_offset(context_key, y, history_size, scale)
+        {
+            // Get mutable access to the terminal and update scroll
+            let grid = self.context_manager.current_grid_mut();
+            if let Some(item) = grid.get_mut(context_key) {
+                let mut terminal = item.context_mut().terminal.lock();
+                let current_offset = terminal.display_offset();
+
+                if new_offset != current_offset {
+                    terminal.grid.scroll_display(
+                        rio_backend::crosswords::grid::Scroll::Delta(
+                            new_offset as i32 - current_offset as i32,
+                        ),
+                    );
+                    terminal.mark_fully_damaged();
+                }
+            }
+        }
+    }
+
+    /// Update the scrollbar hover state based on current mouse position
+    /// Returns true if the hover state changed
+    #[inline]
+    pub fn update_scrollbar_hover(&mut self) -> bool {
+        let scale = self.sugarloaf.scale_factor();
+
+        if let Some((context_key, hit)) =
+            self.renderer
+                .scrollbar_hit_test(self.mouse.x as f32, self.mouse.y as f32, scale)
+        {
+            let is_thumb = hit == crate::renderer::scrollbar::ScrollbarHit::Thumb;
+            let was_hovering = self.mouse.scrollbar_hover;
+
+            if is_thumb {
+                self.renderer.clear_scrollbar_hover();
+                self.renderer.set_scrollbar_hover(context_key, true);
+                self.mouse.scrollbar_hover = true;
+            } else {
+                self.renderer.clear_scrollbar_hover();
+                self.mouse.scrollbar_hover = false;
+            }
+
+            return was_hovering != self.mouse.scrollbar_hover;
+        } else {
+            if self.mouse.scrollbar_hover {
+                self.renderer.clear_scrollbar_hover();
+                self.mouse.scrollbar_hover = false;
+                return true;
+            }
+        }
+
+        false
+    }
+
     /// Check if the mouse is currently over a tab and return the tab index
     #[inline]
     pub fn tab_at_mouse(&self) -> Option<usize> {

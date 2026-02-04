@@ -7,6 +7,7 @@ pub mod keyboard;
 pub mod navigation;
 pub mod platform;
 pub mod renderer;
+pub mod scrollbar;
 pub mod theme;
 pub mod title;
 pub mod window;
@@ -20,6 +21,7 @@ use crate::config::keyboard::Keyboard;
 use crate::config::navigation::Navigation;
 use crate::config::platform::{Platform, PlatformConfig};
 use crate::config::renderer::Renderer;
+use crate::config::scrollbar::Scrollbar;
 use crate::config::title::Title;
 use crate::config::window::Window;
 use colors::Colors;
@@ -106,6 +108,8 @@ pub struct Config {
     pub theme: String,
     #[serde(default = "Scroll::default")]
     pub scroll: Scroll,
+    #[serde(default = "Scrollbar::default")]
+    pub scrollbar: Scrollbar,
     #[serde(
         default = "Option::default",
         skip_serializing,
@@ -600,6 +604,7 @@ impl Default for Config {
             bindings: Bindings::default(),
             colors: Colors::default(),
             scroll: Scroll::default(),
+            scrollbar: Scrollbar::default(),
             keyboard: Keyboard::default(),
             title: Title::default(),
             developer: Developer::default(),

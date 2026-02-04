@@ -36,6 +36,17 @@ pub struct DividerDrag {
     pub last_position: f32,
 }
 
+/// State for tracking scrollbar drag operations
+#[derive(Debug, Clone, Copy)]
+pub struct ScrollbarDrag {
+    /// The context key whose scrollbar is being dragged
+    pub context_key: usize,
+    /// Y position when drag started
+    pub start_y: f32,
+    /// Scroll offset when drag started
+    pub start_offset: usize,
+}
+
 #[derive(Debug)]
 pub struct Mouse {
     pub multiplier: f64,
@@ -53,6 +64,10 @@ pub struct Mouse {
     pub y: usize,
     /// State for tracking divider drag operations
     pub divider_drag: Option<DividerDrag>,
+    /// State for tracking scrollbar drag operations
+    pub scrollbar_drag: Option<ScrollbarDrag>,
+    /// Whether the mouse is hovering over the scrollbar thumb
+    pub scrollbar_hover: bool,
 }
 
 impl Default for Mouse {
@@ -72,6 +87,8 @@ impl Default for Mouse {
             x: Default::default(),
             y: Default::default(),
             divider_drag: None,
+            scrollbar_drag: None,
+            scrollbar_hover: false,
         }
     }
 }
