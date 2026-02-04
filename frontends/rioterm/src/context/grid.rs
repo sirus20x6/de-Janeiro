@@ -741,6 +741,7 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
         for context in self.inner.values_mut() {
             context.val.dimension.update_margin(self.margin);
         }
+        self.calculate_positions();
     }
 
     pub fn update_line_height(&mut self, line_height: f32) {

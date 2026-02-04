@@ -411,6 +411,66 @@ impl Screen<'_> {
         self.mouse.divider_drag.is_some()
     }
 
+    /// Check if the mouse is currently over a tab and return the tab index
+    #[inline]
+    pub fn tab_at_mouse(&self) -> Option<usize> {
+        use crate::constants::PADDING_Y_BOTTOM_TABS;
+        use rio_backend::config::navigation::NavigationMode;
+
+        let nav_mode = &self.renderer.navigation.navigation.mode;
+
+        // Only handle TopTab and BottomTab modes
+        let tab_bar_y = match nav_mode {
+            NavigationMode::TopTab => 0.0,
+            NavigationMode::BottomTab => {
+                let window_size = self.sugarloaf.window_size();
+                let scale = self.sugarloaf.scale_factor();
+                (window_size.height / scale) - PADDING_Y_BOTTOM_TABS
+            }
+            _ => return None, // NativeTab, Bookmark, Plain don't have clickable tabs
+        };
+
+        let window_size = self.sugarloaf.window_size();
+        let scale = self.sugarloaf.scale_factor();
+        let mouse_x = self.mouse.x as f32;
+        let mouse_y = self.mouse.y as f32;
+
+        // Check if mouse is in tab bar Y region (22px tall)
+        if mouse_y < tab_bar_y || mouse_y > tab_bar_y + PADDING_Y_BOTTOM_TABS {
+            return None;
+        }
+
+        // Check for hide_if_single
+        let tab_count = self.context_manager.len();
+        if self.renderer.navigation.navigation.hide_if_single && tab_count <= 1 {
+            return None;
+        }
+
+        // Calculate which tab was clicked
+        // Tab spacing: 130px (name_modifier 90 + 40 from navigation.rs)
+        let tab_spacing = 130.0;
+        let max_tab_width = 140.0;
+        let screen_limit = ((window_size.width / scale) / max_tab_width).floor() as usize;
+        let current = self.context_manager.current_index();
+
+        // Account for tab scrolling (same logic as navigation.rs lines 181-185)
+        let first_visible_tab = if tab_count > screen_limit && current > screen_limit {
+            current - screen_limit
+        } else {
+            0
+        };
+
+        // Calculate clicked tab index
+        let relative_index = (mouse_x / tab_spacing).floor() as usize;
+        let tab_index = first_visible_tab + relative_index;
+
+        if tab_index < tab_count {
+            Some(tab_index)
+        } else {
+            None
+        }
+    }
+
     #[inline]
     pub fn mouse_position(&self, display_offset: usize) -> Pos {
         let current_grid = self.context_manager.current_grid();

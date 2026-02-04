@@ -935,6 +935,15 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                                 route.window.screen.start_divider_drag(divider_hit);
                                 return;
                             }
+
+                            // Check if clicking on a tab
+                            if let Some(tab_index) = route.window.screen.tab_at_mouse() {
+                                route.window.screen.context_manager.select_tab(tab_index);
+                                let num_tabs = route.window.screen.context_manager.len();
+                                route.window.screen.resize_top_or_bottom_line(num_tabs);
+                                route.window.screen.render();
+                                return;
+                            }
                         }
 
                         // In case need to switch grid current
@@ -1159,6 +1168,12 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                         .current_grid_mut()
                         .set_hovered_divider(crate::context::grid::DividerHit::None);
                     route.window.screen.context_manager.request_render();
+                }
+
+                // Check if hovering over a tab
+                if route.window.screen.tab_at_mouse().is_some() {
+                    route.window.winit_window.set_cursor(CursorIcon::Pointer);
+                    return;
                 }
 
                 let point = route.window.screen.mouse_position(display_offset);
